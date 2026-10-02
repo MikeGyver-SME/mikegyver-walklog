@@ -50,6 +50,42 @@ jobs:
           tail -1 "$KEY" | grep -q "END PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing END PRIVATE KEY footer. Re-paste the .p8 file into the secret."; exit 1; }
           echo "API key file OK ($(wc -l < "$KEY") lines)."
 
+      - name: Test App Store Connect API access
+        run: |
+          cat > "$RUNNER_TEMP/api_test.rb" <<'RUBY'
+          require 'openssl'
+          require 'base64'
+          require 'json'
+          require 'net/http'
+          require 'time'
+          key_id = ENV['ASC_KEY_ID']
+          issuer_id = ENV['ASC_ISSUER_ID']
+          p8 = File.read(File.join(ENV['RUNNER_TEMP'], 'asc', 'AuthKey.p8'))
+          b64url = ->(d) { Base64.urlsafe_encode64(d).tr('=', '') }
+          header = b64url.(JSON.generate({ alg: 'ES256', kid: key_id, typ: 'JWT' }))
+          now = Time.now.to_i
+          payload = b64url.(JSON.generate({ iss: issuer_id, iat: now, exp: now + 1200, aud: 'appstoreconnect-v1' }))
+          input = "#{header}.#{payload}"
+          key = OpenSSL::PKey::EC.new(p8)
+          der = key.sign('SHA256', input)
+          seq = OpenSSL::ASN1.decode(der)
+          r = seq.value[0].value.to_s(2).rjust(32, "\x00")[-32, 32]
+          s = seq.value[1].value.to_s(2).rjust(32, "\x00")[-32, 32]
+          token = "#{input}.#{b64url.(r + s)}"
+          uri = URI('https://api.appstoreconnect.apple.com/v1/apps?limit=1')
+          req = Net::HTTP::Get.new(uri)
+          req['Authorization'] = "Bearer #{token}"
+          res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) { |h| h.request(req) }
+          puts "App Store Connect API: HTTP #{res.code}"
+          if res.code == '200'
+            puts 'API key is VALID against Apple - the problem is xcodebuild-side.'
+          else
+            puts "::error::API key REJECTED by Apple (HTTP #{res.code}). The .p8 does not match Key ID #{key_id}, or the Issuer ID is wrong. Body: #{res.body[0, 200]}"
+            exit 1
+          end
+          RUBY
+          ruby "$RUNNER_TEMP/api_test.rb"
+
       - name: Archive (App Store signing, auto provisioning)
         working-directory: ios
         run: |
