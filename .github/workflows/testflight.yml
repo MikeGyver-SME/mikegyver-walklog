@@ -97,9 +97,9 @@ jobs:
       - name: Revoke orphaned distribution certificates
         # Ephemeral runners can't keep private keys between runs, so any
         # Apple-side distribution cert from a previous run is unusable.
-        # Revoke them all via the API (same ES256 JWT pattern as the API
-        # test), then `cert` mints exactly one fresh cert+key below.
-        # Revoking never affects shipped apps or TestFlight builds.
+        # Best-effort hygiene via the API so cert slots never fill up.
+        # If cleanup fails, `cert` below still works until the 3-cert limit
+        # is hit (then revoke manually in the portal) — never block the build.
         run: |
           ruby - <<'RUBY'
           require 'net/http'
@@ -112,32 +112,49 @@ jobs:
           issuer_id = ENV['ASC_ISSUER_ID']
           p8 = File.read(File.join(ENV['RUNNER_TEMP'], 'asc', 'AuthKey.p8'))
 
-          def b64url(data)
-            Base64.urlsafe_encode64(data).tr('=', '')
-          end
-
+          enc = ->(d) { Base64.urlsafe_encode64(d).delete('=') }
           now = Time.now.to_i
-          signing_input = b64url({ 'alg' => 'ES256', 'kid' => key_id, 'typ' => 'JWT' }.to_json) +
-                          '.' + b64url({ 'iss' => issuer_id, 'iat' => now,
-                                         'exp' => now + 600, 'aud' => 'appstoreconnect-v1' }.to_json)
-          jwt = signing_input + '.' + b64url(OpenSSL::PKey.read(p8).sign('SHA256', signing_input))
+          input = enc.call({ 'alg' => 'ES256', 'kid' => key_id, 'typ' => 'JWT' }.to_json) +
+                  '.' + enc.call({ 'iss' => issuer_id, 'iat' => now,
+                                   'exp' => now + 600, 'aud' => 'appstoreconnect-v1' }.to_json)
+          jwt = input + '.' + enc.call(OpenSSL::PKey.read(p8).sign('SHA256', input))
 
           def api(jwt, method, path)
             uri = URI("https://api.appstoreconnect.apple.com#{path}")
-            http = Net::HTTP.new(uri.host, uri.port)
-            http.use_ssl = true
-            req = method == :delete ? Net::HTTP::Delete.new(uri) : Net::HTTP::Get.new(uri)
-            req['Authorization'] = "Bearer #{jwt}"
-            http.request(req)
+            res = nil
+            3.times do |i|
+              http = Net::HTTP.new(uri.host, uri.port)
+              http.use_ssl = true
+              http.open_timeout = 15
+              http.read_timeout = 30
+              if method == :delete
+                req = Net::HTTP::Delete.new(uri.request_uri)
+              else
+                req = Net::HTTP::Get.new(uri.request_uri)
+              end
+              req['Authorization'] = "Bearer #{jwt}"
+              req['Accept'] = 'application/json'
+              res = http.request(req)
+              break unless %w[401 429 500 502 503].include?(res.code)
+              puts "HTTP #{res.code} on #{path}, retrying (#{i + 1}/3)..."
+              sleep 5
+            end
+            res
           end
 
-          res = api(jwt, :get, '/v1/certificates?filter[certificateType]=DISTRIBUTION&limit=10')
-          raise "Certificate list failed: HTTP #{res.code}" unless res.code == '200'
-          certs = JSON.parse(res.body)['data']
-          puts "Found #{certs.length} distribution certificate(s) at Apple."
-          certs.each do |c|
-            del = api(jwt, :delete, "/v1/certificates/#{c['id']}")
-            puts "Revoked #{c.dig('attributes', 'name')} (#{c['id']}): HTTP #{del.code}"
+          begin
+            res = api(jwt, :get, '/v1/certificates?limit=20')
+            raise "list: HTTP #{res.code}: #{res.body[0, 300]}" unless res.code == '200'
+            certs = JSON.parse(res.body)['data'].select do |c|
+              c.dig('attributes', 'certificateType') == 'DISTRIBUTION'
+            end
+            puts "Found #{certs.length} orphaned distribution certificate(s)."
+            certs.each do |c|
+              del = api(jwt, :delete, "/v1/certificates/#{c['id']}")
+              puts "Revoke #{c['id']}: HTTP #{del.code}"
+            end
+          rescue => e
+            puts "::warning::Certificate cleanup failed (best-effort, continuing): #{e.message}"
           end
           RUBY
 
