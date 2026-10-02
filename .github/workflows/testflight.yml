@@ -117,7 +117,11 @@ jobs:
           input = enc.call({ 'alg' => 'ES256', 'kid' => key_id, 'typ' => 'JWT' }.to_json) +
                   '.' + enc.call({ 'iss' => issuer_id, 'iat' => now,
                                    'exp' => now + 600, 'aud' => 'appstoreconnect-v1' }.to_json)
-          jwt = input + '.' + enc.call(OpenSSL::PKey.read(p8).sign('SHA256', input))
+          # ES256/JWS requires the ECDSA signature as raw 64-byte R||S,
+          # not the ASN.1 DER form OpenSSL returns (Apple 401s otherwise).
+          der_sig = OpenSSL::PKey.read(p8).sign('SHA256', input)
+          r, s = OpenSSL::ASN1.decode(der_sig).value.map { |i| i.value.to_s(2).rjust(32, "\x00".b)[-32, 32] }
+          jwt = input + '.' + enc.call(r + s)
 
           def api(jwt, method, path)
             uri = URI("https://api.appstoreconnect.apple.com#{path}")
