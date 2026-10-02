@@ -94,10 +94,13 @@ jobs:
       - name: Create distribution certificate and provisioning profile
         run: |
           mkdir -p "$RUNNER_TEMP/certs" "$RUNNER_TEMP/profiles"
+          # --force: revoke any orphaned cert whose private key is lost
+          # (e.g. created on a previous ephemeral runner) and mint fresh.
           fastlane cert --api_key_path "$RUNNER_TEMP/asc_key.json" \
             --output_path "$RUNNER_TEMP/certs" \
             --keychain_path "$WALKLOG_KEYCHAIN" \
-            --keychain_password "$WALKLOG_KEYCHAIN_PASSWORD"
+            --keychain_password "$WALKLOG_KEYCHAIN_PASSWORD" \
+            --force
           fastlane sigh --api_key_path "$RUNNER_TEMP/asc_key.json" \
             --app_identifier "$BUNDLE_ID" \
             --output_path "$RUNNER_TEMP/profiles" --force
@@ -109,6 +112,11 @@ jobs:
           echo "Profile UUID: $PROFILE_UUID"
           echo "Profile name: $PROFILE_NAME"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+
+      - name: Verify signing identity
+        run: |
+          echo "Identities with private keys in the CI keychain:"
+          security find-identity -v -p codesigning "$WALKLOG_KEYCHAIN"
 
       - name: Archive (manual signing)
         working-directory: ios
