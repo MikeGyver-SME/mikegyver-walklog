@@ -11,6 +11,13 @@ permissions:
 #   ASC_ISSUER_ID  Issuer ID (UUID from the API key page)
 #   ASC_KEY_P8     Full contents of the downloaded AuthKey_XXXX.p8 file
 #   TEAM_ID        Your Apple Developer Team ID (Membership details page)
+#
+# Signing strategy: xcodebuild's -allowProvisioningUpdates does not pick up
+# API-key auth on Xcode 26 ("No Account for Team"), so fastlane drives
+# signing instead: `cert` mints the Apple Distribution certificate and
+# `sigh` fetches the App Store provisioning profile, then xcodebuild
+# archives with manual signing. The API key itself was verified valid
+# (HTTP 200 against api.appstoreconnect.apple.com).
 jobs:
   build:
     runs-on: macos-26
@@ -18,6 +25,7 @@ jobs:
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       TEAM_ID: ${{ secrets.TEAM_ID }}
+      BUNDLE_ID: studio.mikegyver.walklog
     steps:
       - uses: actions/checkout@v4
 
@@ -50,52 +58,55 @@ jobs:
           tail -1 "$KEY" | grep -q "END PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing END PRIVATE KEY footer. Re-paste the .p8 file into the secret."; exit 1; }
           echo "API key file OK ($(wc -l < "$KEY") lines)."
 
-      - name: Test App Store Connect API access
-        run: |
-          cat > "$RUNNER_TEMP/api_test.rb" <<'RUBY'
-          require 'openssl'
-          require 'base64'
-          require 'json'
-          require 'net/http'
-          require 'time'
-          key_id = ENV['ASC_KEY_ID']
-          issuer_id = ENV['ASC_ISSUER_ID']
-          p8 = File.read(File.join(ENV['RUNNER_TEMP'], 'asc', 'AuthKey.p8'))
-          b64url = ->(d) { Base64.urlsafe_encode64(d).tr('=', '') }
-          header = b64url.(JSON.generate({ alg: 'ES256', kid: key_id, typ: 'JWT' }))
-          now = Time.now.to_i
-          payload = b64url.(JSON.generate({ iss: issuer_id, iat: now, exp: now + 1200, aud: 'appstoreconnect-v1' }))
-          input = "#{header}.#{payload}"
-          key = OpenSSL::PKey::EC.new(p8)
-          der = key.sign('SHA256', input)
-          seq = OpenSSL::ASN1.decode(der)
-          r = seq.value[0].value.to_s(2).rjust(32, "\x00")[-32, 32]
-          s = seq.value[1].value.to_s(2).rjust(32, "\x00")[-32, 32]
-          token = "#{input}.#{b64url.(r + s)}"
-          uri = URI('https://api.appstoreconnect.apple.com/v1/apps?limit=1')
-          req = Net::HTTP::Get.new(uri)
-          req['Authorization'] = "Bearer #{token}"
-          res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) { |h| h.request(req) }
-          puts "App Store Connect API: HTTP #{res.code}"
-          if res.code == '200'
-            puts 'API key is VALID against Apple - the problem is xcodebuild-side.'
-          else
-            puts "::error::API key REJECTED by Apple (HTTP #{res.code}). The .p8 does not match Key ID #{key_id}, or the Issuer ID is wrong. Body: #{res.body[0, 200]}"
-            exit 1
-          end
-          RUBY
-          ruby "$RUNNER_TEMP/api_test.rb"
+      - name: Install fastlane
+        run: sudo gem install fastlane -N
 
-      - name: Archive (App Store signing, auto provisioning)
+      - name: Set up CI keychain
+        run: fastlane run setup_ci
+
+      - name: Write API key JSON for fastlane
+        run: |
+          python3 - <<'PY'
+          import os, json
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'asc', 'AuthKey.p8')) as f:
+              p8 = f.read()
+          key = {
+              "key_id": os.environ["ASC_KEY_ID"],
+              "issuer_id": os.environ["ASC_ISSUER_ID"],
+              "key": p8,
+              "in_house": False,
+          }
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'asc_key.json'), 'w') as f:
+              json.dump(key, f)
+          print('API key JSON written')
+          PY
+
+      - name: Create distribution certificate and provisioning profile
+        run: |
+          mkdir -p "$RUNNER_TEMP/certs" "$RUNNER_TEMP/profiles"
+          fastlane cert --api_key_path "$RUNNER_TEMP/asc_key.json" \
+            --output_path "$RUNNER_TEMP/certs"
+          fastlane sigh --api_key_path "$RUNNER_TEMP/asc_key.json" \
+            --app_identifier "$BUNDLE_ID" \
+            --output_path "$RUNNER_TEMP/profiles" --force
+          PROFILE_PATH=$(ls "$RUNNER_TEMP/profiles"/*.mobileprovision | head -1)
+          echo "Profile file: $PROFILE_PATH"
+          PLIST=$(security cms -D -i "$PROFILE_PATH")
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$PLIST")
+          echo "Profile UUID: $PROFILE_UUID"
+          echo "Profile name: $PROFILE_NAME"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+
+      - name: Archive (manual signing)
         working-directory: ios
         run: |
           xcodebuild -project WalkLog.xcodeproj -scheme WalkLog -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/WalkLog.xcarchive" archive \
-            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            -allowProvisioningUpdates \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
             DEVELOPMENT_TEAM="$TEAM_ID"
 
       - name: Write export options
@@ -105,11 +116,15 @@ jobs:
           opts = {
               'method': 'app-store',
               'teamID': os.environ['TEAM_ID'],
+              'signingStyle': 'manual',
+              'provisioningProfiles': {
+                  os.environ['BUNDLE_ID']: os.environ['PROFILE_UUID'],
+              },
               'uploadSymbols': True,
           }
           with open(os.path.join(os.environ['RUNNER_TEMP'], 'exportOptions.plist'), 'wb') as f:
               plistlib.dump(opts, f)
-          print('exportOptions.plist written')
+          print('exportOptions.plist written (manual signing)')
           PY
 
       - name: Export IPA
@@ -118,30 +133,11 @@ jobs:
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/WalkLog.xcarchive" \
             -exportPath "$RUNNER_TEMP/export" \
-            -exportOptionsPlist "$RUNNER_TEMP/exportOptions.plist" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -exportOptionsPlist "$RUNNER_TEMP/exportOptions.plist"
           ls -la "$RUNNER_TEMP/export"
-
-      - name: Install fastlane
-        run: sudo gem install fastlane -N
 
       - name: Upload to TestFlight
         run: |
-          python3 - <<'PY'
-          import os, json
-          key = {
-              "key_id": os.environ["ASC_KEY_ID"],
-              "issuer_id": os.environ["ASC_ISSUER_ID"],
-              "key": """${{ secrets.ASC_KEY_P8 }}""",
-              "in_house": False,
-          }
-          with open(os.path.join(os.environ['RUNNER_TEMP'], 'asc_key.json'), 'w') as f:
-              json.dump(key, f)
-          print('API key JSON written')
-          PY
           fastlane pilot upload \
             --ipa "$RUNNER_TEMP/export/WalkLog.ipa" \
             --api_key_path "$RUNNER_TEMP/asc_key.json" \
