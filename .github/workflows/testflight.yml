@@ -54,8 +54,9 @@ jobs:
           [ -n "$ASC_KEY_ID" ] || { echo "::error::ASC_KEY_ID secret is empty."; exit 1; }
           [ -n "$ASC_ISSUER_ID" ] || { echo "::error::ASC_ISSUER_ID secret is empty."; exit 1; }
           [ -n "$TEAM_ID" ] || { echo "::error::TEAM_ID secret is empty."; exit 1; }
-          # Team IDs are 10 alphanumeric chars; catch typos/whitespace without printing the value.
-          echo "$TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$' || { echo "::error::TEAM_ID secret does not look like a 10-character Apple Team ID. Check for typos or extra whitespace."; exit 1; }
+          # Team IDs are alphanumeric (older ones 10 chars, newer ones longer);
+          # catch typos/whitespace without printing the value.
+          echo "$TEAM_ID" | grep -Eq '^[A-Z0-9]{8,16}$' || { echo "::error::TEAM_ID secret does not look like an Apple Team ID. Check for typos or extra whitespace."; exit 1; }
           head -1 "$KEY" | grep -q "BEGIN PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing BEGIN PRIVATE KEY header. Re-paste the .p8 file into the secret."; exit 1; }
           tail -1 "$KEY" | grep -q "END PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing END PRIVATE KEY footer. Re-paste the .p8 file into the secret."; exit 1; }
           echo "API key file OK ($(wc -l < "$KEY") lines)."
