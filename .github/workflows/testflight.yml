@@ -34,13 +34,27 @@ jobs:
       - name: Write App Store Connect API key
         run: |
           mkdir -p "$RUNNER_TEMP/asc"
-          printf '%s' '${{ secrets.ASC_KEY_P8 }}' > "$RUNNER_TEMP/asc/AuthKey.p8"
+          # Trailing newline: some PEM parsers reject a key file without one.
+          printf '%s\n' '${{ secrets.ASC_KEY_P8 }}' > "$RUNNER_TEMP/asc/AuthKey.p8"
           chmod 600 "$RUNNER_TEMP/asc/AuthKey.p8"
+
+      - name: Validate API key
+        run: |
+          KEY="$RUNNER_TEMP/asc/AuthKey.p8"
+          echo "Key ID: $ASC_KEY_ID"
+          echo "Issuer ID: $ASC_ISSUER_ID"
+          [ -n "$ASC_KEY_ID" ] || { echo "::error::ASC_KEY_ID secret is empty."; exit 1; }
+          [ -n "$ASC_ISSUER_ID" ] || { echo "::error::ASC_ISSUER_ID secret is empty."; exit 1; }
+          [ -n "$TEAM_ID" ] || { echo "::error::TEAM_ID secret is empty."; exit 1; }
+          head -1 "$KEY" | grep -q "BEGIN PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing BEGIN PRIVATE KEY header. Re-paste the .p8 file into the secret."; exit 1; }
+          tail -1 "$KEY" | grep -q "END PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing END PRIVATE KEY footer. Re-paste the .p8 file into the secret."; exit 1; }
+          echo "API key file OK ($(wc -l < "$KEY") lines)."
 
       - name: Archive (App Store signing, auto provisioning)
         working-directory: ios
         run: |
           xcodebuild -project WalkLog.xcodeproj -scheme WalkLog -configuration Release \
+            -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/WalkLog.xcarchive" archive \
             -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
             -authenticationKeyID "$ASC_KEY_ID" \
