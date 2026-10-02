@@ -177,6 +177,28 @@ jobs:
           echo "Profile name: $PROFILE_NAME"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
 
+      - name: Resolve signing team from Apple
+        # The sigh profile carries Apple's authoritative team ID. Prefer it
+        # over the hand-entered TEAM_ID secret (lengths only are logged,
+        # never values). Also dumps keychain state for diagnosis.
+        run: |
+          PROFILE_PATH=$(ls "$RUNNER_TEMP/profiles"/*.mobileprovision | head -1)
+          PLIST=$(security cms -D -i "$PROFILE_PATH")
+          PROFILE_TEAM=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$PLIST")
+          [ -n "$PROFILE_TEAM" ] || { echo "::error::Could not read team ID from provisioning profile."; exit 1; }
+          echo "Profile team ID length: ${#PROFILE_TEAM}"
+          echo "TEAM_ID secret length: ${#TEAM_ID}"
+          if [ "$TEAM_ID" = "$PROFILE_TEAM" ]; then
+            echo "TEAM_ID matches Apple's team ID."
+          else
+            echo "::warning::TEAM_ID secret does not match Apple's team ID; using Apple's value."
+          fi
+          echo "EFFECTIVE_TEAM_ID=$PROFILE_TEAM" >> "$GITHUB_ENV"
+          echo "--- keychain search list ---"
+          security list-keychains -d user
+          echo "--- identities visible by default ---"
+          security find-identity -v -p codesigning | head -6
+
       - name: Verify signing identity
         run: |
           echo "Identities with private keys in the CI keychain:"
@@ -192,7 +214,7 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            DEVELOPMENT_TEAM="$TEAM_ID"
+            DEVELOPMENT_TEAM="$EFFECTIVE_TEAM_ID"
 
       - name: Write export options
         run: |
@@ -200,7 +222,7 @@ jobs:
           import os, plistlib
           opts = {
               'method': 'app-store',
-              'teamID': os.environ['TEAM_ID'],
+              'teamID': os.environ['EFFECTIVE_TEAM_ID'],
               'signingStyle': 'manual',
               'provisioningProfiles': {
                   os.environ['BUNDLE_ID']: os.environ['PROFILE_UUID'],
