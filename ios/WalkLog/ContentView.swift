@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var session: WalkSession
+    @ObservedObject private var settings = SettingsStore.shared
     @State private var showSettings = false
     @State private var confirmStop = false
 
@@ -45,7 +46,7 @@ struct ContentView: View {
                 .foregroundStyle(Brand.navy, Brand.gold)
             Text("Ready when you are.")
                 .font(.title2)
-            if !session.settings.isConfigured {
+            if !settings.isConfigured {
                 Text("Add your Worker URL and token in Settings to begin.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
