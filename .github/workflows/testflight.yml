@@ -54,6 +54,8 @@ jobs:
           [ -n "$ASC_KEY_ID" ] || { echo "::error::ASC_KEY_ID secret is empty."; exit 1; }
           [ -n "$ASC_ISSUER_ID" ] || { echo "::error::ASC_ISSUER_ID secret is empty."; exit 1; }
           [ -n "$TEAM_ID" ] || { echo "::error::TEAM_ID secret is empty."; exit 1; }
+          # Team IDs are 10 alphanumeric chars; catch typos/whitespace without printing the value.
+          echo "$TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$' || { echo "::error::TEAM_ID secret does not look like a 10-character Apple Team ID. Check for typos or extra whitespace."; exit 1; }
           head -1 "$KEY" | grep -q "BEGIN PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing BEGIN PRIVATE KEY header. Re-paste the .p8 file into the secret."; exit 1; }
           tail -1 "$KEY" | grep -q "END PRIVATE KEY" || { echo "::error::ASC_KEY_P8 is malformed: missing END PRIVATE KEY footer. Re-paste the .p8 file into the secret."; exit 1; }
           echo "API key file OK ($(wc -l < "$KEY") lines)."
@@ -91,16 +93,60 @@ jobs:
           print('API key JSON written')
           PY
 
+      - name: Revoke orphaned distribution certificates
+        # Ephemeral runners can't keep private keys between runs, so any
+        # Apple-side distribution cert from a previous run is unusable.
+        # Revoke them all via the API (same ES256 JWT pattern as the API
+        # test), then `cert` mints exactly one fresh cert+key below.
+        # Revoking never affects shipped apps or TestFlight builds.
+        run: |
+          ruby - <<'RUBY'
+          require 'net/http'
+          require 'uri'
+          require 'json'
+          require 'openssl'
+          require 'base64'
+
+          key_id = ENV['ASC_KEY_ID']
+          issuer_id = ENV['ASC_ISSUER_ID']
+          p8 = File.read(File.join(ENV['RUNNER_TEMP'], 'asc', 'AuthKey.p8'))
+
+          def b64url(data)
+            Base64.urlsafe_encode64(data).tr('=', '')
+          end
+
+          now = Time.now.to_i
+          signing_input = b64url({ 'alg' => 'ES256', 'kid' => key_id, 'typ' => 'JWT' }.to_json) +
+                          '.' + b64url({ 'iss' => issuer_id, 'iat' => now,
+                                         'exp' => now + 600, 'aud' => 'appstoreconnect-v1' }.to_json)
+          jwt = signing_input + '.' + b64url(OpenSSL::PKey.read(p8).sign('SHA256', signing_input))
+
+          def api(jwt, method, path)
+            uri = URI("https://api.appstoreconnect.apple.com#{path}")
+            http = Net::HTTP.new(uri.host, uri.port)
+            http.use_ssl = true
+            req = method == :delete ? Net::HTTP::Delete.new(uri) : Net::HTTP::Get.new(uri)
+            req['Authorization'] = "Bearer #{jwt}"
+            http.request(req)
+          end
+
+          res = api(jwt, :get, '/v1/certificates?filter[certificateType]=DISTRIBUTION&limit=10')
+          raise "Certificate list failed: HTTP #{res.code}" unless res.code == '200'
+          certs = JSON.parse(res.body)['data']
+          puts "Found #{certs.length} distribution certificate(s) at Apple."
+          certs.each do |c|
+            del = api(jwt, :delete, "/v1/certificates/#{c['id']}")
+            puts "Revoked #{c.dig('attributes', 'name')} (#{c['id']}): HTTP #{del.code}"
+          end
+          RUBY
+
       - name: Create distribution certificate and provisioning profile
         run: |
           mkdir -p "$RUNNER_TEMP/certs" "$RUNNER_TEMP/profiles"
-          # --force: revoke any orphaned cert whose private key is lost
-          # (e.g. created on a previous ephemeral runner) and mint fresh.
           fastlane cert --api_key_path "$RUNNER_TEMP/asc_key.json" \
             --output_path "$RUNNER_TEMP/certs" \
             --keychain_path "$WALKLOG_KEYCHAIN" \
-            --keychain_password "$WALKLOG_KEYCHAIN_PASSWORD" \
-            --force
+            --keychain_password "$WALKLOG_KEYCHAIN_PASSWORD"
           fastlane sigh --api_key_path "$RUNNER_TEMP/asc_key.json" \
             --app_identifier "$BUNDLE_ID" \
             --output_path "$RUNNER_TEMP/profiles" --force
@@ -116,7 +162,8 @@ jobs:
       - name: Verify signing identity
         run: |
           echo "Identities with private keys in the CI keychain:"
-          security find-identity -v -p codesigning "$WALKLOG_KEYCHAIN"
+          security find-identity -v -p codesigning "$WALKLOG_KEYCHAIN" | tee "$RUNNER_TEMP/identities.txt"
+          grep -q "Apple Distribution" "$RUNNER_TEMP/identities.txt" || { echo "::error::No Apple Distribution identity with private key found in the CI keychain."; exit 1; }
 
       - name: Archive (manual signing)
         working-directory: ios
