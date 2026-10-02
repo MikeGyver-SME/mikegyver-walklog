@@ -61,8 +61,18 @@ jobs:
       - name: Install fastlane
         run: sudo gem install fastlane -N
 
-      - name: Set up CI keychain
-        run: fastlane run setup_ci
+      - name: Create signing keychain
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/walklog.keychain-db"
+          PASSWORD="$(openssl rand -base64 32)"
+          echo "WALKLOG_KEYCHAIN_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          echo "WALKLOG_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -s "$KEYCHAIN"
+          echo "Keychain ready: $KEYCHAIN"
 
       - name: Write API key JSON for fastlane
         run: |
@@ -85,7 +95,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/certs" "$RUNNER_TEMP/profiles"
           fastlane cert --api_key_path "$RUNNER_TEMP/asc_key.json" \
-            --output_path "$RUNNER_TEMP/certs"
+            --output_path "$RUNNER_TEMP/certs" \
+            --keychain_path "$WALKLOG_KEYCHAIN" \
+            --keychain_password "$WALKLOG_KEYCHAIN_PASSWORD"
           fastlane sigh --api_key_path "$RUNNER_TEMP/asc_key.json" \
             --app_identifier "$BUNDLE_ID" \
             --output_path "$RUNNER_TEMP/profiles" --force
