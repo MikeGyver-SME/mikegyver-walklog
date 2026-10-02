@@ -247,6 +247,12 @@ jobs:
             -exportOptionsPlist "$RUNNER_TEMP/exportOptions.plist"
           ls -la "$RUNNER_TEMP/export"
 
+      - name: Dump built Info.plist (diagnostic)
+        run: |
+          APP_PLIST="$RUNNER_TEMP/WalkLog.xcarchive/Products/Applications/WalkLog.app/Info.plist"
+          echo "--- keys that Apple's validator checks ---"
+          plutil -p "$APP_PLIST" | grep -E "UILaunch|UIRequiresFullScreen|UISupportedInterfaceOrientations|UIDeviceFamily|MinimumOSVersion" || true
+
       - name: Upload to TestFlight
         run: |
           fastlane pilot upload \
