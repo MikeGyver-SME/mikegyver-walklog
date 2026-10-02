@@ -39,6 +39,19 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
+      - name: Guard Info.plist against XcodeGen overwrite
+        # XcodeGen's `info:` block silently overwrites the hand-written plist
+        # with defaults (we removed it; INFOPLIST_FILE is set explicitly).
+        # Fail fast here instead of after a full build + Apple rejection.
+        working-directory: ios
+        run: |
+          if ! git diff --quiet -- WalkLog/Info.plist; then
+            echo "::error::xcodegen modified WalkLog/Info.plist - the hand-written keys were clobbered."
+            git diff -- WalkLog/Info.plist | head -40
+            exit 1
+          fi
+          echo "Info.plist untouched by XcodeGen"
+
       - name: Write App Store Connect API key
         run: |
           mkdir -p "$RUNNER_TEMP/asc"
