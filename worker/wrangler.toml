@@ -1,0 +1,16 @@
+name = "walklog-api"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# SQLite-backed Durable Object that stores every walk + GPS point.
+[[durable_objects.bindings]]
+name = "WALKLOG"
+class_name = "WalkLogDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WalkLogDO"]
+
+# Bearer token for the API. Set it with:
+#   npx wrangler secret put WALKLOG_TOKEN
+# (Never commit the token to git.)

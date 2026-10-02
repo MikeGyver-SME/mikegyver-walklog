@@ -1,0 +1,106 @@
+name: Build and upload WalkLog to TestFlight
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   ASC_KEY_ID     App Store Connect API key ID (e.g. A1B2C3D4E5)
+#   ASC_ISSUER_ID  Issuer ID (UUID from the API key page)
+#   ASC_KEY_P8     Full contents of the downloaded AuthKey_XXXX.p8 file
+#   TEAM_ID        Your Apple Developer Team ID (Membership details page)
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' '${{ secrets.ASC_KEY_P8 }}' > "$RUNNER_TEMP/asc/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/asc/AuthKey.p8"
+
+      - name: Archive (App Store signing, auto provisioning)
+        working-directory: ios
+        run: |
+          xcodebuild -project WalkLog.xcodeproj -scheme WalkLog -configuration Release \
+            -archivePath "$RUNNER_TEMP/WalkLog.xcarchive" archive \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            -allowProvisioningUpdates \
+            DEVELOPMENT_TEAM="$TEAM_ID"
+
+      - name: Write export options
+        run: |
+          python3 - <<'PY'
+          import os, plistlib
+          opts = {
+              'method': 'app-store',
+              'teamID': os.environ['TEAM_ID'],
+              'uploadSymbols': True,
+          }
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'exportOptions.plist'), 'wb') as f:
+              plistlib.dump(opts, f)
+          print('exportOptions.plist written')
+          PY
+
+      - name: Export IPA
+        working-directory: ios
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/WalkLog.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/exportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Install fastlane
+        run: sudo gem install fastlane -N
+
+      - name: Upload to TestFlight
+        run: |
+          python3 - <<'PY'
+          import os, json
+          key = {
+              "key_id": os.environ["ASC_KEY_ID"],
+              "issuer_id": os.environ["ASC_ISSUER_ID"],
+              "key": """${{ secrets.ASC_KEY_P8 }}""",
+              "in_house": False,
+          }
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'asc_key.json'), 'w') as f:
+              json.dump(key, f)
+          print('API key JSON written')
+          PY
+          fastlane pilot upload \
+            --ipa "$RUNNER_TEMP/export/WalkLog.ipa" \
+            --api_key_path "$RUNNER_TEMP/asc_key.json" \
+            --skip_submission \
+            --skip_waiting_for_build_processing
+
+      - name: Keep a copy of the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WalkLog-ipa
+          path: ${{ runner.temp }}/export/WalkLog.ipa
+          retention-days: 14
