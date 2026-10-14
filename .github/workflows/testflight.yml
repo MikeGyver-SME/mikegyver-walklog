@@ -29,6 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Native distance regression tests
+        run: |
+          swiftc ios/WalkLog/Models.swift ios/Tests/main.swift -o "$RUNNER_TEMP/distance-tests"
+          "$RUNNER_TEMP/distance-tests"
+
       - name: Xcode version
         run: xcodebuild -version
 
@@ -112,7 +117,7 @@ jobs:
         # Apple-side distribution cert from a previous run is unusable.
         # Best-effort hygiene via the API so cert slots never fill up.
         # If cleanup fails, `cert` below still works until the 3-cert limit
-        # is hit (then revoke manually in the portal) — never block the build.
+        # is hit (then revoke manually in the portal) â€” never block the build.
         run: |
           ruby - <<'RUBY'
           require 'net/http'

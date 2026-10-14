@@ -103,16 +103,49 @@ enum Geo {
         let s = sin(dLat / 2) * sin(dLat / 2)
             + cos(a.latitude * .pi / 180) * cos(b.latitude * .pi / 180)
             * sin(dLon / 2) * sin(dLon / 2)
-        return 2 * r * asin(sqrt(s))
+        return 2 * r * asin(sqrt(min(1, max(0, s))))
     }
 
     static func totalDistanceMeters(_ points: [TrackPoint]) -> Double {
         guard points.count >= 2 else { return 0 }
+        // Use the same 3 m distance-only simplification as the Worker.
+        // Keep every raw point for uploads and map rendering.
+        var keep: Set<Int> = [0, points.count - 1]
+        var stack: [(Int, Int)] = [(0, points.count - 1)]
+        while let (a, b) = stack.popLast() {
+            var best = 3.0
+            var index: Int?
+            if b > a + 1 {
+                for i in (a + 1)..<b {
+                    let d = deviation(points[i].coordinate, points[a].coordinate, points[b].coordinate)
+                    if d > best { best = d; index = i }
+                }
+            }
+            if let i = index {
+                keep.insert(i)
+                stack.append((a, i)); stack.append((i, b))
+            }
+        }
+        let indices = keep.sorted()
         var total = 0.0
-        for i in 1 ..< points.count {
-            total += haversineMeters(from: points[i - 1].coordinate,
-                                     to: points[i].coordinate)
+        for i in 1..<indices.count {
+            total += haversineMeters(from: points[indices[i - 1]].coordinate,
+                                     to: points[indices[i]].coordinate)
         }
         return total
+    }
+
+    private static func deviation(_ p: CLLocationCoordinate2D,
+                                  _ a: CLLocationCoordinate2D,
+                                  _ b: CLLocationCoordinate2D) -> Double {
+        let r = 6_371_000.0
+        let scale = cos(a.latitude * .pi / 180)
+        let x = (p.longitude - a.longitude) * .pi / 180 * r * scale
+        let y = (p.latitude - a.latitude) * .pi / 180 * r
+        let bx = (b.longitude - a.longitude) * .pi / 180 * r * scale
+        let by = (b.latitude - a.latitude) * .pi / 180 * r
+        let lengthSquared = bx * bx + by * by
+        let t = lengthSquared > 0 ? max(0, min(1, (x * bx + y * by) / lengthSquared)) : 0
+        return hypot(x - t * bx, y - t * by)
     }
 }

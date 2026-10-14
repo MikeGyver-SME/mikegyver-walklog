@@ -31,6 +31,7 @@ final class WalkSession: ObservableObject {
     private var lastUpload = Date.distantPast
     private var sentCount = 0
     private var uploading = false
+    private var uploadTask: Task<Void, Never>?
     private var tickTimer: Timer?
 
     var settings: SettingsStore { SettingsStore.shared }
@@ -107,6 +108,8 @@ final class WalkSession: ObservableObject {
 
     private func handleLocation(_ loc: CLLocation) {
         guard phase == .acquiring || phase == .tracking else { return }
+        // Ignore duplicate or out-of-order fixes.
+        if let last = points.last, loc.timestamp <= last.timestamp { return }
         let p = TrackPoint(from: loc)
         points.append(p)
         if phase == .acquiring, points.count >= 3 {
@@ -141,11 +144,12 @@ final class WalkSession: ObservableObject {
         guard !uploading, let api, let walkId, sentCount < points.count else { return }
         uploading = true
         lastUpload = Date()
-        let batch = Array(points[sentCount...])
-        Task {
+        let batchEnd = points.count
+        let batch = Array(points[sentCount..<batchEnd])
+        uploadTask = Task {
             do {
                 try await api.uploadPoints(walkId: walkId, points: batch)
-                self.sentCount = self.points.count
+                self.sentCount = batchEnd
             } catch {
                 // Points stay local; the next cycle retries.
             }
@@ -154,6 +158,8 @@ final class WalkSession: ObservableObject {
     }
 
     private func finish() async {
+        // Wait for the current batch before flushing the final tail.
+        await uploadTask?.value
         if let api, let walkId, sentCount < points.count {
             try? await api.uploadPoints(walkId: walkId, points: Array(points[sentCount...]))
             sentCount = points.count

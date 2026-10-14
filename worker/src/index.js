@@ -1,3 +1,4 @@
+import { distanceMeters, rawDistanceMeters } from "./distance.js";
 // WalkLog API — Cloudflare Worker backed by a SQLite Durable Object.
 //
 // Routes (all JSON except /map, which returns HTML):
@@ -12,19 +13,6 @@
 //
 // Auth: every route except "/" and "/walks/:id/map" requires
 //   Authorization: Bearer <WALKLOG_TOKEN>
-
-const EARTH_R_M = 6371000;
-
-function toRad(d) { return (d * Math.PI) / 180; }
-
-function haversineMeters(a, b) {
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_R_M * Math.asin(Math.sqrt(s));
-}
 
 function authorized(request, env) {
   const h = request.headers.get("Authorization") || "";
@@ -129,13 +117,8 @@ export class WalkLogDO {
     const walk = firstRow(sql.exec(`SELECT * FROM walks WHERE id = ?`, id));
     if (!walk) return null;
     const pts = this.getPoints(id);
-    let distanceM = 0;
-    for (let i = 1; i < pts.length; i++) {
-      distanceM += haversineMeters(
-        { lat: pts[i - 1].lat, lon: pts[i - 1].lon },
-        { lat: pts[i].lat, lon: pts[i].lon }
-      );
-    }
+    const distanceM = distanceMeters(pts);
+    const rawDistanceM = rawDistanceMeters(pts);
     const startTs = pts.length ? pts[0].ts : walk.started_at;
     const endTs = pts.length ? pts[pts.length - 1].ts : (walk.ended_at || walk.started_at);
     const durationS = Math.max(0, (endTs - startTs) / 1000);
@@ -147,6 +130,8 @@ export class WalkLogDO {
       started_at: walk.started_at,
       ended_at: walk.ended_at,
       duration_s: Math.round(durationS),
+      distance_method: "rdp-3m-v1",
+      raw_distance_m: Math.round(rawDistanceM * 10) / 10,
       distance_m: Math.round(distanceM * 10) / 10,
       distance_mi: Math.round(distanceMi * 1000) / 1000,
       avg_mph: Math.round(avgMph * 100) / 100,

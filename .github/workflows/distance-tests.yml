@@ -1,0 +1,18 @@
+name: Distance regression tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  distance:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test
+        working-directory: worker
+      - name: Compile and run native distance tests
+        run: |
+          swiftc ios/WalkLog/Models.swift ios/Tests/main.swift -o "$RUNNER_TEMP/distance-tests"
+          "$RUNNER_TEMP/distance-tests"
