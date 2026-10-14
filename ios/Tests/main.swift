@@ -10,7 +10,20 @@ func check(_ points: [TrackPoint], _ expected: Double) {
 }
 check([], 0)
 check([p(0,0)], 0)
-check((0...200).map { i in p(Double(i)*5, i == 0 || i == 200 ? 0 : (i % 2 == 1 ? 2 : -2)) }, 1000)
+var noisyStraight: [TrackPoint] = []
+for i in 0...200 {
+    let x: Double = Double(i) * 5.0
+    let y: Double
+    if i == 0 || i == 200 {
+        y = 0.0
+    } else if i % 2 == 1 {
+        y = 2.0
+    } else {
+        y = -2.0
+    }
+    noisyStraight.append(p(x, y))
+}
+check(noisyStraight, 1000.0)
 check([p(0,0),p(50,0),p(100,0),p(100,50),p(100,100)], 200)
 check([p(0,0),p(50,0),p(100,0),p(50,0),p(0,0)], 200)
 check([p(0,0),p(100,0),p(100,100),p(0,100),p(0,0)], 400)
